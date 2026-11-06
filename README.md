@@ -3,10 +3,28 @@
 [![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)]()
+[![Security](https://img.shields.io/badge/security-Touch%20ID%20Gated-brightgreen)]()
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
-**Turn your running Outlook Desktop into an MCP server.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server.** You do not need Microsoft Graph API, Entra app registration, or OAuth tokens. The server connects directly to your local Outlook session.
 
-Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session.
+Any Model Context Protocol (MCP) client (Claude Code, Claude Desktop, Cursor) can read emails, search mailboxes, manage calendars, and organize tasks through your existing Outlook application.
+
+> **Upstream Attribution & Extensions**:
+> This project is forked from the original work by **Andreas Martin Aanerud** ([aaanerud/outlook-desktop-mcp](https://github.com/aaanerud/outlook-desktop-mcp)).
+> Maintained and extended by **Grobler Engineering** ([hemelbesem90s/outlook-desktop-mcp](https://github.com/hemelbesem90s/outlook-desktop-mcp)) to add native macOS Touch ID biometric security gating for mutating operations, delete message tools, and zero-trust verification.
+
+## Biometric Security Gate (macOS)
+
+AI agents should read data freely but ask for explicit human permission before altering your mailbox. On macOS, this server integrates native **Apple Touch ID** via the `LocalAuthentication` framework:
+
+- **Frictionless Reading**: Read-only tools (`list_emails`, `read_email`, `search_emails`, `list_events`, `list_folders`, `list_tasks`) run immediately without biometric friction.
+- **Biometric Gate on Mutations**: Mutating operations trigger a native Touch ID prompt with full operational context:
+  - `send_email` and `reply_email` display the recipient and subject.
+  - `create_event`, `create_calendar_event`, `create_meeting`, and `update_event` display event details and attendees.
+  - `delete_event`, `delete_calendar_event`, `delete_message`, `delete_email`, and `delete_task` show the specific item ID before removal.
+- **Fail-Safe Fallback**: If biometric evaluation is unavailable, the server falls back to an explicit macOS system confirmation dialog.
+- **CI / Testing Override**: Set `OUTLOOK_MCP_DISABLE_BIOMETRICS=1` in your environment to bypass prompts during automated test runs.
 
 ## Quick Start
 
@@ -22,11 +40,11 @@ pip install outlook-desktop-mcp
 claude mcp add outlook-desktop -- outlook-desktop-mcp
 ```
 
-**3. Open Outlook and start a Claude Code session.** That's it — tools are available immediately.
+**3. Open Outlook and start a Claude Code session.** Tools become available immediately.
 
 ## How It Works — Platform Routing
 
-When the server starts, it checks which operating system it is running on and takes one of two paths:
+When the server starts, it checks your operating system and routes commands to the appropriate bridge:
 
 ```
                         outlook-desktop-mcp starts
@@ -38,8 +56,8 @@ When the server starts, it checks which operating system it is running on and ta
               ┌───────┴────────┐    ┌────────┴────────┐
               │  server.py     │    │  server_mac.py   │
               │  COM Bridge    │    │  AppleScript     │
-              │  (29 tools)    │    │  Bridge          │
-              │                │    │  (22 tools)      │
+              │  (29 tools)    │    │  + Touch ID Gate │
+              │                │    │  (27 tools)      │
               └───────┬────────┘    └────────┬─────────┘
                       |                      |
               OUTLOOK.EXE via         Microsoft Outlook
@@ -111,47 +129,51 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 
 ### Email
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `send_email` | yes | yes | Send an email with To/CC/BCC, plain text or HTML body |
-| `list_emails` | yes | yes | List recent emails from any folder, with optional unread filter |
-| `read_email` | yes | yes | Read full email content by entry ID or subject search |
-| `search_emails` | yes | yes | Full-text search across email subjects and bodies |
-| `reply_email` | yes | yes | Reply or reply-all, preserving the conversation thread |
-| `mark_as_read` | yes | yes | Mark a specific email as read |
-| `mark_as_unread` | yes | yes | Mark a specific email as unread |
-| `move_email` | yes | yes | Move an email to Archive, Trash, or any folder |
-| `list_folders` | yes | yes | Browse the folder hierarchy with item counts |
+| Tool | Windows | macOS | Biometric Gate | Description |
+|------|:-------:|:-----:|:--------------:|-------------|
+| `send_email` | yes | yes | **Touch ID** | Send an email with To/CC/BCC, plain text or HTML body |
+| `reply_email` | yes | yes | **Touch ID** | Reply or reply-all, preserving the conversation thread |
+| `delete_message` | — | yes | **Touch ID** | Permanently delete an email message by numeric ID |
+| `delete_email` | — | yes | **Touch ID** | Alias for `delete_message` |
+| `list_emails` | yes | yes | — | List recent emails from any folder, with optional unread filter |
+| `read_email` | yes | yes | — | Read full email content by entry ID or subject search |
+| `search_emails` | yes | yes | — | Full-text search across email subjects and bodies |
+| `mark_as_read` | yes | yes | — | Mark a specific email as read |
+| `mark_as_unread` | yes | yes | — | Mark a specific email as unread |
+| `move_email` | yes | yes | — | Move an email to Archive, Trash, or any folder |
+| `list_folders` | yes | yes | — | Browse the folder hierarchy with item counts |
 
 ### Calendar
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_events` | yes | yes | List upcoming events within a date range |
-| `get_event` | yes | yes | Read full event details by entry ID |
-| `create_event` | yes | yes | Create a personal calendar appointment |
-| `create_meeting` | yes | yes | Create a meeting and send invitations to attendees |
-| `update_event` | yes | yes | Modify an existing event's subject, time, location, etc. |
-| `delete_event` | yes | yes | Delete an appointment or cancel a meeting |
-| `respond_to_meeting` | yes | — | Accept, decline, or tentatively accept a meeting invite |
-| `search_events` | yes | yes | Search calendar events by keyword within a date range |
+| Tool | Windows | macOS | Biometric Gate | Description |
+|------|:-------:|:-----:|:--------------:|-------------|
+| `create_event` | yes | yes | **Touch ID** | Create a personal calendar appointment |
+| `create_calendar_event`| — | yes | **Touch ID** | Alias for `create_event` |
+| `create_meeting` | yes | yes | **Touch ID** | Create a meeting and send invitations to attendees |
+| `update_event` | yes | yes | **Touch ID** | Modify an existing event's subject, time, location, etc. |
+| `delete_event` | yes | yes | **Touch ID** | Delete an appointment or cancel a meeting |
+| `delete_calendar_event`| — | yes | **Touch ID** | Alias for `delete_event` |
+| `list_events` | yes | yes | — | List upcoming events within a date range |
+| `get_event` | yes | yes | — | Read full event details by entry ID |
+| `search_events` | yes | yes | — | Search calendar events by keyword within a date range |
+| `respond_to_meeting` | yes | — | — | Accept, decline, or tentatively accept a meeting invite |
 
 ### Tasks
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_tasks` | yes | yes | List pending or completed tasks, sorted by due date |
-| `get_task` | yes | yes | Read full task details including body and completion status |
-| `create_task` | yes | yes | Create a new task with subject, due date, importance |
-| `complete_task` | yes | yes | Mark a task as complete |
-| `delete_task` | yes | yes | Remove a task |
+| Tool | Windows | macOS | Biometric Gate | Description |
+|------|:-------:|:-----:|:--------------:|-------------|
+| `delete_task` | yes | yes | **Touch ID** | Remove a task |
+| `list_tasks` | yes | yes | — | List pending or completed tasks, sorted by due date |
+| `get_task` | yes | yes | — | Read full task details including body and completion status |
+| `create_task` | yes | yes | — | Create a new task with subject, due date, importance |
+| `complete_task` | yes | yes | — | Mark a task as complete |
 
 ### Attachments
 
-| Tool | Windows | macOS | Description |
-|------|:-------:|:-----:|-------------|
-| `list_attachments` | yes | yes | List all attachments on an email or calendar event |
-| `save_attachment` | yes | yes | Download an attachment to a local directory |
+| Tool | Windows | macOS | Biometric Gate | Description |
+|------|:-------:|:-----:|:--------------:|-------------|
+| `list_attachments` | yes | yes | — | List all attachments on an email or calendar event |
+| `save_attachment` | yes | yes | — | Download an attachment to a local directory |
 
 ### Categories, Rules, Out of Office (Windows only)
 
@@ -165,7 +187,7 @@ These tools rely on COM-specific APIs (MAPI property accessors, the Rules object
 | `toggle_rule` | yes | — | Enable or disable a mail rule by name |
 | `get_out_of_office` | yes | — | Check whether Out of Office auto-reply is on or off |
 
-**Total: 29 tools on Windows, 22 tools on macOS.**
+**Total: 29 tools on Windows, 27 tools on macOS.**
 
 ## Architecture Details
 
@@ -301,7 +323,8 @@ outlook-desktop-mcp/
   src/outlook_desktop_mcp/
     entrypoint.py            # Platform detection → routes to correct server
     server.py                # Windows MCP server (29 tools, COM automation)
-    server_mac.py            # macOS MCP server (22 tools, AppleScript)
+    server_mac.py            # macOS MCP server (27 tools, AppleScript + Touch ID)
+    biometrics.py            # Native macOS Touch ID gate (Swift LocalAuthentication)
     com_bridge.py            # Async-to-COM threading bridge (Windows)
     applescript_bridge.py    # Async osascript execution (macOS)
     tools/
@@ -311,12 +334,13 @@ outlook-desktop-mcp/
       errors.py              # COM error formatting (Windows)
       applescript_helpers.py # AppleScript escaping, date formatting (macOS)
   tests/
-    phase1_com_test.py       # Email COM validation
-    phase3_mcp_test.py       # Email MCP test
-    calendar_com_test.py     # Calendar COM validation
-    calendar_mcp_test.py     # Calendar MCP test
-    extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test
-    extras_mcp_test.py       # Tasks/attachments/categories/rules/OOF MCP test
+    test_biometrics_mac.py   # Unit tests for Touch ID gating, fallbacks, and tool blocking
+    phase1_com_test.py       # Email COM validation (Windows)
+    phase3_mcp_test.py       # Email MCP test (Windows)
+    calendar_com_test.py     # Calendar COM validation (Windows)
+    calendar_mcp_test.py     # Calendar MCP test (Windows)
+    extras_com_test.py       # Tasks/attachments/categories/rules/OOF COM test (Windows)
+    extras_mcp_test.py       # Tasks/attachments/categories/rules/OOF MCP test (Windows)
   outlook-desktop-mcp.cmd   # Windows launcher script
   pyproject.toml
 ```
@@ -325,6 +349,8 @@ outlook-desktop-mcp/
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and development setup.
 
-## License
+## Attribution & License
 
-See [LICENSE](LICENSE) file.
+- **Original Author**: Andreas Martin Aanerud ([aaanerud/outlook-desktop-mcp](https://github.com/aaanerud/outlook-desktop-mcp))
+- **Biometric Extensions**: Jacob Grobler / [Grobler Engineering](https://grobler.nl) ([hemelbesem90s/outlook-desktop-mcp](https://github.com/hemelbesem90s/outlook-desktop-mcp))
+- **License**: GNU Affero General Public License v3.0 ([AGPL-3.0](LICENSE)).

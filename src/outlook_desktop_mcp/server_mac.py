@@ -16,6 +16,7 @@ import re
 from mcp.server.fastmcp import FastMCP
 
 from outlook_desktop_mcp.applescript_bridge import AppleScriptBridge
+from outlook_desktop_mcp.biometrics import verify_biometric_gate
 from outlook_desktop_mcp.utils.applescript_helpers import (
     escape,
     format_date,
@@ -48,11 +49,14 @@ mcp = FastMCP(
         "All operations use the locally running Outlook app — no "
         "Microsoft Graph API, no Entra app registration, no OAuth tokens needed. "
         "The user's existing Outlook session handles all authentication.\n\n"
+        "SECURITY: Mutating operations (sending emails, deleting messages, "
+        "modifying or deleting calendar events) require native Touch ID biometric "
+        "verification on macOS before execution.\n\n"
         "PREREQUISITE: Microsoft Outlook for Mac must be running.\n\n"
         "NOTE: entry_id values on macOS are numeric IDs (not hex strings like "
         "on Windows). They identify items within their folder context.\n\n"
         "AVAILABLE TOOL CATEGORIES:\n"
-        "- Email: send, list, read, search, reply, mark read/unread, move\n"
+        "- Email: send, list, read, search, reply, mark read/unread, move, delete\n"
         "- Calendar: list events, create appointments/meetings, update, delete, "
         "search events\n"
         "- Tasks: create, list, complete, delete to-do items\n"
@@ -259,6 +263,13 @@ async def send_email(
     bcc_lines = _recipient_lines(bcc, "bcc recipient") if bcc else ""
 
     content_prop = f'html content:"{escape(html_body)}"' if html_body else f'content:"{escape(body)}"'
+
+    prompt = f"Authorize sending email to '{to}' with subject '{subject}'"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Email not sent."
+        )
 
     script = f'''tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{escape(subject)}", {content_prop}}}
@@ -643,6 +654,13 @@ async def reply_email(
         Confirmation indicating the reply was sent, or an error.
     """
     reply_cmd = "reply all to" if reply_all else "reply to"
+    prompt = f"Authorize sending reply to email ID {entry_id} (reply_all={reply_all})"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Reply not sent."
+        )
+
     script = f'''tell application "Microsoft Outlook"
     set m to message id {entry_id}
     set msubject to subject of m
@@ -657,6 +675,58 @@ end tell'''
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
     except Exception as e:
         return f"Error replying to email: {e}"
+
+
+# =====================================================================
+# TOOL: delete_message / delete_email
+# =====================================================================
+
+@mcp.tool()
+async def delete_message(entry_id: str) -> str:
+    """Permanently delete an email message by its ID.
+
+    Gated by native Touch ID biometric verification before executing AppleScript.
+
+    Args:
+        entry_id: The numeric ID of the email to delete.
+
+    Returns:
+        Confirmation indicating the message was deleted, or an error.
+    """
+    prompt = f"Authorize permanently deleting email message ID {entry_id}"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Message not deleted."
+        )
+
+    script = f'''tell application "Microsoft Outlook"
+    set m to message id {entry_id}
+    set msubject to subject of m
+    delete m
+    return msubject
+end tell'''
+
+    try:
+        subject = await bridge.run(script)
+        return f"Message deleted: '{subject}' (ID: {entry_id})"
+    except Exception as e:
+        return f"Error deleting message: {e}"
+
+
+@mcp.tool()
+async def delete_email(entry_id: str) -> str:
+    """Delete an email message (alias for delete_message).
+
+    Gated by native Touch ID biometric verification before executing AppleScript.
+
+    Args:
+        entry_id: The numeric ID of the email to delete.
+
+    Returns:
+        Confirmation indicating the message was deleted, or an error.
+    """
+    return await delete_message(entry_id=entry_id)
 
 
 # =====================================================================
@@ -998,6 +1068,12 @@ async def create_event(
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
 
+    prompt = f"Authorize creating calendar event '{subject}' on {start}"
+    if not await verify_biometric_gate(prompt):
+        return json.dumps({
+            "error": "Biometric verification required. Authorization was denied or cancelled by user. Event not created."
+        })
+
     props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
     if location:
         props += f', location:"{escape(location)}"'
@@ -1062,6 +1138,13 @@ async def create_meeting(
     """
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
+
+    prompt = f"Authorize creating calendar meeting '{subject}' with {required_attendees} on {start}"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Meeting not created."
+        )
 
     props = f'subject:"{escape(subject)}", start time:{format_date(start_dt)}, end time:{format_date(end_dt)}'
     if location:
@@ -1139,6 +1222,12 @@ async def update_event(
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
 
+    prompt = f"Authorize updating calendar event ID {entry_id}"
+    if not await verify_biometric_gate(prompt):
+        return json.dumps({
+            "error": "Biometric verification required. Authorization was denied or cancelled by user. Event not updated."
+        })
+
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
@@ -1170,7 +1259,7 @@ async def delete_event(entry_id: str) -> str:
     """Delete a calendar event.
 
     For personal appointments, the event is simply deleted. For meetings,
-    the event is removed from your calendar.
+    the event is removed from your calendar. Gated by Touch ID biometric verification.
 
     Args:
         entry_id: The numeric ID of the event to delete.
@@ -1178,6 +1267,13 @@ async def delete_event(entry_id: str) -> str:
     Returns:
         Confirmation with the event subject, or an error.
     """
+    prompt = f"Authorize deleting calendar event ID {entry_id}"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Event not deleted."
+        )
+
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set esubject to subject of e
@@ -1190,6 +1286,60 @@ end tell'''
         return f"Event deleted: '{subject}'"
     except Exception as e:
         return f"Error deleting event: {e}"
+
+
+@mcp.tool()
+async def create_calendar_event(
+    subject: str,
+    start: str,
+    end: str,
+    location: str = "",
+    body: str = "",
+    all_day: bool = False,
+    reminder_minutes: int = 15,
+) -> str:
+    """Create a personal calendar appointment (alias for create_event).
+
+    Gated by Touch ID biometric verification.
+
+    Args:
+        subject: The event title.
+        start: Start time in ISO 8601 format. Examples: "2026-02-25 14:00",
+            "2026-02-25T14:00:00". For all-day events, use just the date.
+        end: End time in ISO 8601 format.
+        location: Optional. Event location.
+        body: Optional. Description or notes for the event.
+        all_day: If true, creates an all-day event. Default false.
+        reminder_minutes: Minutes before the event to show a reminder.
+            Default 15. Set to 0 to disable reminder.
+
+    Returns:
+        Confirmation with event subject and entry_id, or an error.
+    """
+    return await create_event(
+        subject=subject,
+        start=start,
+        end=end,
+        location=location,
+        body=body,
+        all_day=all_day,
+        reminder_minutes=reminder_minutes,
+    )
+
+
+@mcp.tool()
+async def delete_calendar_event(entry_id: str) -> str:
+    """Delete a calendar event (alias for delete_event).
+
+    Gated by Touch ID biometric verification.
+
+    Args:
+        entry_id: The numeric ID of the event to delete.
+
+    Returns:
+        Confirmation with the event subject, or an error.
+    """
+    return await delete_event(entry_id=entry_id)
 
 
 # =====================================================================
@@ -1468,7 +1618,7 @@ end tell'''
 
 @mcp.tool()
 async def delete_task(entry_id: str) -> str:
-    """Delete a task from Outlook.
+    """Delete a task from Outlook. Gated by native Touch ID biometric verification.
 
     Args:
         entry_id: The numeric ID of the task to delete.
@@ -1476,6 +1626,13 @@ async def delete_task(entry_id: str) -> str:
     Returns:
         Confirmation with the task subject.
     """
+    prompt = f"Authorize deleting task ID {entry_id}"
+    if not await verify_biometric_gate(prompt):
+        return (
+            "Error: Biometric verification required. Authorization was denied "
+            "or cancelled by user. Task not deleted."
+        )
+
     script = f'''tell application "Microsoft Outlook"
     set t to task id {entry_id}
     set tname to name of t
