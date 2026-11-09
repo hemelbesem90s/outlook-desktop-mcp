@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -145,6 +145,34 @@ async def test_mutating_tools_blocked_when_biometric_denied():
         # 10. delete_task
         res_del_task = await delete_task(entry_id="42")
         assert "Biometric verification required" in res_del_task
+
+
+@pytest.mark.asyncio
+async def test_update_event_attendee_confirmation_required():
+    # Mock inspecting an event with 3 attendees
+    inspect_meta = "42|||Team Sync|||organizer@example.com|||3|||Alice <a@ex.com>; Bob <b@ex.com>; Carol <c@ex.com>; |||false|||false"
+    with patch.object(bridge, "run", return_value=inspect_meta):
+        # 1. Without confirmation: should return confirmation_required and NOT call biometric gate
+        gate_mock = MagicMock(return_value=True)
+        with patch("outlook_desktop_mcp.server_mac.verify_biometric_gate", gate_mock):
+            res = json.loads(await update_event(entry_id="42", location="Room B", confirm_send_updates=False))
+            assert res["status"] == "confirmation_required"
+            assert res["attendees_count"] == 3
+            assert "Alice" in res["attendees"]
+            assert gate_mock.call_count == 0
+
+    # 2. With confirmation: proceeds to biometric gate and update script
+    update_return = "42|||Team Sync|||Monday|||Tuesday|||Room B"
+    with patch.object(bridge, "run", side_effect=[inspect_meta, update_return]):
+        gate_mock = AsyncMock(return_value=True)
+        with patch("outlook_desktop_mcp.server_mac.verify_biometric_gate", gate_mock):
+            res = json.loads(await update_event(entry_id="42", location="Room B", confirm_send_updates=True))
+            assert res["status"] == "updated"
+            assert res["location"] == "Room B"
+            assert res["attendees_notified"] is True
+            assert gate_mock.call_count == 1
+            prompt_used = gate_mock.call_args[0][0]
+            assert "NOTIFYING 3 ATTENDEES" in prompt_used
 
 
 @pytest.mark.asyncio

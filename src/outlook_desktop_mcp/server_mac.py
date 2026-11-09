@@ -930,7 +930,15 @@ async def list_events(
             set eorganizer to organizer of e
         end try
         set eallday to all day flag of e
-        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        set isRec to false
+        try
+            set isRec to is recurring of e
+        end try
+        set isOcc to false
+        try
+            set isOcc to is occurrence of e
+        end try
+        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text) & "{RECORD_DELIM}"
     end repeat
     return output
 end tell'''
@@ -956,6 +964,8 @@ end tell'''
                 "location": _clean(parts[4]),
                 "organizer": _clean(parts[5]),
                 "all_day": parts[6].strip().lower() == "true",
+                "is_recurring": parts[7].strip().lower() == "true" if len(parts) > 7 else False,
+                "is_occurrence": parts[8].strip().lower() == "true" if len(parts) > 8 else False,
             })
         return json.dumps(results, indent=2, default=str)
     except Exception as e:
@@ -1003,15 +1013,36 @@ async def get_event(entry_id: str) -> str:
     try
         set attList to attendees of e
         repeat with a in attList
-            set eattendees to eattendees & address of a & "; "
+            try
+                set em to email address of a
+                set eattendees to eattendees & (name of em) & " <" & (address of em) & ">; "
+            on error
+                try
+                    set eattendees to eattendees & (address of a) & "; "
+                end try
+            end try
         end repeat
     end try
-    return (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & ebody & "{DELIM}" & eattendees
+    set isRec to false
+    try
+        set isRec to is recurring of e
+    end try
+    set isOcc to false
+    try
+        set isOcc to is occurrence of e
+    end try
+    set masterId to ""
+    if isOcc then
+        try
+            set masterId to id of master of e as text
+        end try
+    end if
+    return (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & ebody & "{DELIM}" & eattendees & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text) & "{DELIM}" & masterId
 end tell'''
 
     try:
         raw = await bridge.run(script)
-        parts = raw.split(DELIM, 8)
+        parts = raw.split(DELIM)
         if len(parts) < 9:
             return json.dumps({"error": "Failed to parse event data"})
 
@@ -1025,6 +1056,9 @@ end tell'''
             "all_day": parts[6].strip().lower() == "true",
             "body": _truncate(_clean(parts[7])),
             "attendees": parts[8].strip(),
+            "is_recurring": parts[9].strip().lower() == "true" if len(parts) > 9 else False,
+            "is_occurrence": parts[10].strip().lower() == "true" if len(parts) > 10 else False,
+            "master_id": parts[11].strip() if len(parts) > 11 else "",
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -1188,11 +1222,18 @@ async def update_event(
     end: str = "",
     location: str = "",
     body: str = "",
+    confirm_send_updates: bool = False,
 ) -> str:
     """Update an existing calendar event.
 
     Modifies properties of an appointment or meeting. Only the fields you
     provide will be updated — omitted fields remain unchanged.
+
+    SAFETY FOR EVENTS WITH ATTENDEES:
+    If this event has attendees, modifying it may notify attendees.
+    To prevent accidental emails, if the event has attendees and
+    confirm_send_updates is False, the update will halt and return the
+    attendee list, requiring you to confirm with confirm_send_updates=True.
 
     Args:
         entry_id: The numeric ID of the event to update.
@@ -1201,9 +1242,11 @@ async def update_event(
         end: Optional. New end time in ISO 8601 format.
         location: Optional. New location.
         body: Optional. New description/notes.
+        confirm_send_updates: Must be set to True to confirm modifying an
+            event that has attendees. Default False.
 
     Returns:
-        Confirmation with updated event details, or an error.
+        Confirmation with updated event details, warning if confirmation needed, or error.
     """
     set_lines = ""
     if subject:
@@ -1222,8 +1265,68 @@ async def update_event(
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
 
-    prompt = f"Authorize updating calendar event ID {entry_id}"
-    if not await verify_biometric_gate(prompt):
+    # Inspect event attendees and recurrence before applying edits
+    inspect_script = f'''tell application "Microsoft Outlook"
+    set e to calendar event id {entry_id}
+    set attCount to count of attendees of e
+    set attSummary to ""
+    if attCount > 0 then
+        repeat with a in attendees of e
+            try
+                set em to email address of a
+                set attSummary to attSummary & (name of em) & " <" & (address of em) & ">; "
+            on error
+                try
+                    set attSummary to attSummary & (address of a) & "; "
+                end try
+            end try
+        end repeat
+    end if
+    set isRec to false
+    try
+        set isRec to is recurring of e
+    end try
+    set isOcc to false
+    try
+        set isOcc to is occurrence of e
+    end try
+    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (organizer of e) & "{DELIM}" & (attCount as text) & "{DELIM}" & attSummary & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text)
+end tell'''
+
+    try:
+        raw_meta = await bridge.run(inspect_script)
+        meta_parts = raw_meta.split(DELIM)
+        current_subject = meta_parts[1].strip() if len(meta_parts) > 1 else subject
+        organizer = meta_parts[2].strip() if len(meta_parts) > 2 else ""
+        att_count = int(meta_parts[3].strip()) if len(meta_parts) > 3 and meta_parts[3].strip().isdigit() else 0
+        att_summary = meta_parts[4].strip() if len(meta_parts) > 4 else ""
+        is_rec = meta_parts[5].strip().lower() == "true" if len(meta_parts) > 5 else False
+        is_occ = meta_parts[6].strip().lower() == "true" if len(meta_parts) > 6 else False
+    except Exception as e:
+        return json.dumps({"error": f"Failed to inspect event {entry_id}: {e}"})
+
+    # Attendee protection guardrail: require explicit confirmation
+    if att_count > 0 and not confirm_send_updates:
+        return json.dumps({
+            "status": "confirmation_required",
+            "message": (
+                f"Event '{current_subject}' has {att_count} attendee(s). "
+                "Updating it may send notification emails to attendees. "
+                "Please confirm by calling update_event with confirm_send_updates=True."
+            ),
+            "entry_id": entry_id,
+            "subject": current_subject,
+            "attendees_count": att_count,
+            "attendees": att_summary,
+            "is_recurring": is_rec,
+            "is_occurrence": is_occ,
+        }, indent=2)
+
+    prompt_context = f"Authorize updating calendar event ID {entry_id} ('{current_subject}')"
+    if att_count > 0:
+        prompt_context += f" [NOTIFYING {att_count} ATTENDEES: {att_summary[:60]}...]"
+
+    if not await verify_biometric_gate(prompt_context):
         return json.dumps({
             "error": "Biometric verification required. Authorization was denied or cancelled by user. Event not updated."
         })
@@ -1244,6 +1347,8 @@ end tell'''
             "start": parts[2].strip() if len(parts) > 2 else "",
             "end": parts[3].strip() if len(parts) > 3 else "",
             "location": _clean(parts[4]) if len(parts) > 4 else "",
+            "attendees_notified": att_count > 0,
+            "attendees_count": att_count,
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
@@ -1391,7 +1496,15 @@ async def search_events(
             set eorganizer to organizer of e
         end try
         set eallday to all day flag of e
-        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{RECORD_DELIM}"
+        set isRec to false
+        try
+            set isRec to is recurring of e
+        end try
+        set isOcc to false
+        try
+            set isOcc to is occurrence of e
+        end try
+        set output to output & (eid as text) & "{DELIM}" & esubject & "{DELIM}" & estart & "{DELIM}" & eend & "{DELIM}" & elocation & "{DELIM}" & eorganizer & "{DELIM}" & (eallday as text) & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text) & "{RECORD_DELIM}"
     end repeat
     return output
 end tell'''
@@ -1417,6 +1530,8 @@ end tell'''
                 "location": _clean(parts[4]),
                 "organizer": _clean(parts[5]),
                 "all_day": parts[6].strip().lower() == "true",
+                "is_recurring": parts[7].strip().lower() == "true" if len(parts) > 7 else False,
+                "is_occurrence": parts[8].strip().lower() == "true" if len(parts) > 8 else False,
             })
         return json.dumps(results, indent=2, default=str)
     except Exception as e:

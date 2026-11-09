@@ -150,7 +150,7 @@ Both permissions are one-time setup — macOS remembers them for future sessions
 | `create_event` | yes | yes | **Touch ID** | Create a personal calendar appointment |
 | `create_calendar_event`| — | yes | **Touch ID** | Alias for `create_event` |
 | `create_meeting` | yes | yes | **Touch ID** | Create a meeting and send invitations to attendees |
-| `update_event` | yes | yes | **Touch ID** | Modify an existing event's subject, time, location, etc. |
+| `update_event` | yes | yes | **Touch ID** | Modify event properties. If attendees exist, halts and requires `confirm_send_updates=True` to prevent unexpected emails |
 | `delete_event` | yes | yes | **Touch ID** | Delete an appointment or cancel a meeting |
 | `delete_calendar_event`| — | yes | **Touch ID** | Alias for `delete_event` |
 | `list_events` | yes | yes | — | List upcoming events within a date range |

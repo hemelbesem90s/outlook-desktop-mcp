@@ -1075,12 +1075,19 @@ async def update_event(
     location: str = "",
     body: str = "",
     account: str = "",
+    confirm_send_updates: bool = False,
 ) -> str:
     """Update an existing calendar event.
 
     Modifies properties of an appointment or meeting. Only the fields you
-    provide will be updated — omitted fields remain unchanged. For meetings
-    you organize, attendees will receive an update notification.
+    provide will be updated — omitted fields remain unchanged.
+
+    SAFETY FOR EVENTS WITH ATTENDEES:
+    If this event has attendees and you are the organizer, modifying it
+    will send update notifications to attendees.
+    To prevent accidental emails, if the event has attendees and
+    confirm_send_updates is False, the update will halt and return the
+    attendee list, requiring you to confirm with confirm_send_updates=True.
 
     Args:
         entry_id: The unique Outlook EntryID of the event to update.
@@ -1091,11 +1098,13 @@ async def update_event(
         body: Optional. New description/notes.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        confirm_send_updates: Must be set to True to confirm modifying an
+            event that has attendees. Default False.
 
     Returns:
-        Confirmation with updated event details, or an error.
+        Confirmation with updated event details, warning if confirmation needed, or an error.
     """
-    def _update(outlook, namespace, entry_id, subject, start, end, location, body, account):
+    def _update(outlook, namespace, entry_id, subject, start, end, location, body, account, confirm_send_updates):
         if account:
             store = _require_store(namespace, account)
             item = namespace.GetItemFromID(entry_id, store.StoreID)
@@ -1103,6 +1112,32 @@ async def update_event(
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
             return err
+
+        # Inspect attendees
+        recipients = item.Recipients
+        att_count = recipients.Count if recipients else 0
+        if att_count > 0 and not confirm_send_updates:
+            att_list = []
+            for i in range(1, att_count + 1):
+                try:
+                    r = recipients.Item(i)
+                    att_list.append(f"{r.Name} <{r.Address}>")
+                except Exception:
+                    pass
+            return json.dumps({
+                "status": "confirmation_required",
+                "message": (
+                    f"Event '{item.Subject}' has {att_count} attendee(s). "
+                    "Updating it will send notification emails to attendees. "
+                    "Please confirm by calling update_event with confirm_send_updates=True."
+                ),
+                "entry_id": item.EntryID,
+                "subject": item.Subject,
+                "attendees_count": att_count,
+                "attendees": "; ".join(att_list),
+                "is_recurring": bool(item.IsRecurring),
+            }, indent=2)
+
         if subject:
             item.Subject = subject
         if start:
@@ -1121,11 +1156,13 @@ async def update_event(
             "end": str(item.End),
             "location": item.Location or "",
             "entry_id": item.EntryID,
+            "attendees_notified": att_count > 0,
+            "attendees_count": att_count,
         }, indent=2, default=str)
 
     try:
         return await bridge.call(
-            _update, entry_id, subject, start, end, location, body, account,
+            _update, entry_id, subject, start, end, location, body, account, confirm_send_updates,
         )
     except Exception as e:
         return f"Error updating event: {format_com_error(e)}"
