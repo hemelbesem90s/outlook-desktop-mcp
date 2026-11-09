@@ -1222,18 +1222,17 @@ async def update_event(
     end: str = "",
     location: str = "",
     body: str = "",
-    confirm_send_updates: bool = False,
+    send_updates: bool = False,
 ) -> str:
     """Update an existing calendar event.
 
     Modifies properties of an appointment or meeting. Only the fields you
     provide will be updated — omitted fields remain unchanged.
 
-    SAFETY FOR EVENTS WITH ATTENDEES:
-    If this event has attendees, modifying it may notify attendees.
-    To prevent accidental emails, if the event has attendees and
-    confirm_send_updates is False, the update will halt and return the
-    attendee list, requiring you to confirm with confirm_send_updates=True.
+    ATTENDEE UPDATE BEHAVIOR:
+    By default (send_updates=False), modifying an event updates the calendar
+    silently without sending notification emails to attendees. Set
+    send_updates=True only if you explicitly want to dispatch update emails.
 
     Args:
         entry_id: The numeric ID of the event to update.
@@ -1242,11 +1241,11 @@ async def update_event(
         end: Optional. New end time in ISO 8601 format.
         location: Optional. New location.
         body: Optional. New description/notes.
-        confirm_send_updates: Must be set to True to confirm modifying an
-            event that has attendees. Default False.
+        send_updates: If True, explicitly dispatches update emails to attendees.
+            Default is False (silent update).
 
     Returns:
-        Confirmation with updated event details, warning if confirmation needed, or error.
+        Confirmation with updated event details, or an error.
     """
     set_lines = ""
     if subject:
@@ -1265,23 +1264,10 @@ async def update_event(
     if not set_lines:
         return json.dumps({"error": "No fields to update"})
 
-    # Inspect event attendees and recurrence before applying edits
+    # Inspect event metadata for clear biometric prompt context
     inspect_script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     set attCount to count of attendees of e
-    set attSummary to ""
-    if attCount > 0 then
-        repeat with a in attendees of e
-            try
-                set em to email address of a
-                set attSummary to attSummary & (name of em) & " <" & (address of em) & ">; "
-            on error
-                try
-                    set attSummary to attSummary & (address of a) & "; "
-                end try
-            end try
-        end repeat
-    end if
     set isRec to false
     try
         set isRec to is recurring of e
@@ -1290,50 +1276,50 @@ async def update_event(
     try
         set isOcc to is occurrence of e
     end try
-    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (organizer of e) & "{DELIM}" & (attCount as text) & "{DELIM}" & attSummary & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text)
+    return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (attCount as text) & "{DELIM}" & (isRec as text) & "{DELIM}" & (isOcc as text)
 end tell'''
 
     try:
         raw_meta = await bridge.run(inspect_script)
         meta_parts = raw_meta.split(DELIM)
         current_subject = meta_parts[1].strip() if len(meta_parts) > 1 else subject
-        organizer = meta_parts[2].strip() if len(meta_parts) > 2 else ""
-        att_count = int(meta_parts[3].strip()) if len(meta_parts) > 3 and meta_parts[3].strip().isdigit() else 0
-        att_summary = meta_parts[4].strip() if len(meta_parts) > 4 else ""
-        is_rec = meta_parts[5].strip().lower() == "true" if len(meta_parts) > 5 else False
-        is_occ = meta_parts[6].strip().lower() == "true" if len(meta_parts) > 6 else False
+        att_count = int(meta_parts[2].strip()) if len(meta_parts) > 2 and meta_parts[2].strip().isdigit() else 0
+        is_rec = meta_parts[3].strip().lower() == "true" if len(meta_parts) > 3 else False
+        is_occ = meta_parts[4].strip().lower() == "true" if len(meta_parts) > 4 else False
     except Exception as e:
         return json.dumps({"error": f"Failed to inspect event {entry_id}: {e}"})
 
-    # Attendee protection guardrail: require explicit confirmation
-    if att_count > 0 and not confirm_send_updates:
-        return json.dumps({
-            "status": "confirmation_required",
-            "message": (
-                f"Event '{current_subject}' has {att_count} attendee(s). "
-                "Updating it may send notification emails to attendees. "
-                "Please confirm by calling update_event with confirm_send_updates=True."
-            ),
-            "entry_id": entry_id,
-            "subject": current_subject,
-            "attendees_count": att_count,
-            "attendees": att_summary,
-            "is_recurring": is_rec,
-            "is_occurrence": is_occ,
-        }, indent=2)
-
     prompt_context = f"Authorize updating calendar event ID {entry_id} ('{current_subject}')"
     if att_count > 0:
-        prompt_context += f" [NOTIFYING {att_count} ATTENDEES: {att_summary[:60]}...]"
+        if send_updates:
+            prompt_context += f" [SENDING UPDATE EMAILS TO {att_count} ATTENDEES]"
+        else:
+            prompt_context += f" [SILENT UPDATE: {att_count} attendees, NO emails sent]"
 
     if not await verify_biometric_gate(prompt_context):
         return json.dumps({
             "error": "Biometric verification required. Authorization was denied or cancelled by user. Event not updated."
         })
 
+    # When send_updates is requested on an event with attendees, dispatch an update message
+    notify_block = ""
+    if send_updates and att_count > 0:
+        notify_block = f'''
+        set attList to attendees of e
+        set notifyMsg to make new outgoing message with properties {{subject:"Updated: " & (subject of e), content:"The calendar event '" & (subject of e) & "' has been updated." & return & return & "Time: " & (start time of e as string) & " - " & (end time of e as string) & return & "Location: " & (location of e as string)}}
+        repeat with a in attList
+            try
+                set em to email address of a
+                make new to recipient at notifyMsg with properties {{email address:{{name:(name of em), address:(address of em)}}}}
+            end try
+        end repeat
+        send notifyMsg
+        '''
+
     script = f'''tell application "Microsoft Outlook"
     set e to calendar event id {entry_id}
     {set_lines}
+    {notify_block}
     return (id of e as text) & "{DELIM}" & (subject of e) & "{DELIM}" & (start time of e as string) & "{DELIM}" & (end time of e as string) & "{DELIM}" & (location of e)
 end tell'''
 
@@ -1347,8 +1333,10 @@ end tell'''
             "start": parts[2].strip() if len(parts) > 2 else "",
             "end": parts[3].strip() if len(parts) > 3 else "",
             "location": _clean(parts[4]) if len(parts) > 4 else "",
-            "attendees_notified": att_count > 0,
             "attendees_count": att_count,
+            "send_updates": send_updates and att_count > 0,
+            "is_recurring": is_rec,
+            "is_occurrence": is_occ,
         }
         return json.dumps(result, indent=2, default=str)
     except Exception as e:

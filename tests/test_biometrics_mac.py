@@ -148,31 +148,37 @@ async def test_mutating_tools_blocked_when_biometric_denied():
 
 
 @pytest.mark.asyncio
-async def test_update_event_attendee_confirmation_required():
+async def test_update_event_default_silent():
     # Mock inspecting an event with 3 attendees
-    inspect_meta = "42|||Team Sync|||organizer@example.com|||3|||Alice <a@ex.com>; Bob <b@ex.com>; Carol <c@ex.com>; |||false|||false"
-    with patch.object(bridge, "run", return_value=inspect_meta):
-        # 1. Without confirmation: should return confirmation_required and NOT call biometric gate
-        gate_mock = MagicMock(return_value=True)
-        with patch("outlook_desktop_mcp.server_mac.verify_biometric_gate", gate_mock):
-            res = json.loads(await update_event(entry_id="42", location="Room B", confirm_send_updates=False))
-            assert res["status"] == "confirmation_required"
-            assert res["attendees_count"] == 3
-            assert "Alice" in res["attendees"]
-            assert gate_mock.call_count == 0
-
-    # 2. With confirmation: proceeds to biometric gate and update script
+    inspect_meta = "42|||Team Sync|||3|||false|||false"
     update_return = "42|||Team Sync|||Monday|||Tuesday|||Room B"
     with patch.object(bridge, "run", side_effect=[inspect_meta, update_return]):
         gate_mock = AsyncMock(return_value=True)
         with patch("outlook_desktop_mcp.server_mac.verify_biometric_gate", gate_mock):
-            res = json.loads(await update_event(entry_id="42", location="Room B", confirm_send_updates=True))
+            # Default send_updates=False: updates silently without requiring pre-flight halt
+            res = json.loads(await update_event(entry_id="42", location="Room B"))
             assert res["status"] == "updated"
             assert res["location"] == "Room B"
-            assert res["attendees_notified"] is True
+            assert res["send_updates"] is False
+            assert res["attendees_count"] == 3
             assert gate_mock.call_count == 1
             prompt_used = gate_mock.call_args[0][0]
-            assert "NOTIFYING 3 ATTENDEES" in prompt_used
+            assert "SILENT UPDATE" in prompt_used
+
+
+@pytest.mark.asyncio
+async def test_update_event_explicit_send_updates():
+    inspect_meta = "42|||Team Sync|||3|||false|||false"
+    update_return = "42|||Team Sync|||Monday|||Tuesday|||Room B"
+    with patch.object(bridge, "run", side_effect=[inspect_meta, update_return]):
+        gate_mock = AsyncMock(return_value=True)
+        with patch("outlook_desktop_mcp.server_mac.verify_biometric_gate", gate_mock):
+            res = json.loads(await update_event(entry_id="42", location="Room B", send_updates=True))
+            assert res["status"] == "updated"
+            assert res["send_updates"] is True
+            assert gate_mock.call_count == 1
+            prompt_used = gate_mock.call_args[0][0]
+            assert "SENDING UPDATE EMAILS" in prompt_used
 
 
 @pytest.mark.asyncio
